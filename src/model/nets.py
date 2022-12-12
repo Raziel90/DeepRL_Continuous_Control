@@ -9,9 +9,11 @@ class DDPGNet(nn.Module):
     def __init__(self, states, actions, hidden_layers=None, seed=None):
         super(DDPGNet, self).__init__()
         if hidden_layers is None:
-            hidden_layers = [64, 64]
+            self.hidden_layers = [64, 64]
+        else:
+            self.hidden_layers = hidden_layers
         if seed is None:
-            self.seed = torch.seed()
+            self.seed = torch.initial_seed()
         else:
             self.seed = torch.manual_seed(seed)
         
@@ -22,7 +24,7 @@ class DDPGNet(nn.Module):
 
         self.input_layer.weight.data.uniform_(*self._init_layer(self.input_layer))
         for i in range(len(self.hidden_layers)):
-            self.hidden_layers[i].weights.data.uniform_(*self._init_layer(self.hidden_layers[i]))
+            self.hidden_layers[i].weight.data.uniform_(*self._init_layer(self.hidden_layers[i]))
         self.output_layer.weight.data.uniform_(-3e-3, 3e-3)
 
     def _init_layer(self, layer):
@@ -32,16 +34,16 @@ class DDPGNet(nn.Module):
         
         
 
-class Actor(nn.Module):
+class Actor(DDPGNet):
     
     def __init__(self, states, actions, hidden_layers=None, seed=None):
-        super(Actor, self).__init__(states, actions, hidden_layers=None, seed=None)
+        super(Actor, self).__init__(states, actions, hidden_layers, seed)
 
-        self.input_layer = nn.Linear(self.n_states, self.hidden_layer[0])
+        self.input_layer = nn.Linear(self.n_states, self.hidden_layers[0])
+        self.output_layer = nn.Linear(self.hidden_layers[-1], self.n_actions)
         self.hidden_layers = nn.ModuleList([
-            nn.Linear(l_sz_prev, l_sz) for l_sz_prev, l_sz in zip(self.hidden_layer[0:-1], self.hidden_layer[1:])
+            nn.Linear(l_sz_prev, l_sz) for l_sz_prev, l_sz in zip(self.hidden_layers[0:-1], self.hidden_layers[1:])
             ])
-        self.output_layer = nn.Linear(self.hidden_layer[-1], self.n_actions)
 
         self.reset_parameters()
 
@@ -55,7 +57,7 @@ class Actor(nn.Module):
 
         
 
-class Critic(nn.Module):
+class Critic(DDPGNet):
     """Initialize parameters and build model.
         Params
         ======
@@ -65,15 +67,15 @@ class Critic(nn.Module):
             seed (int): Random seed
     """
     def __init__(self, states, actions, hidden_layers=None, seed=None):
-        super(Critic, self).__init__(states, actions, hidden_layers=None, seed=None)
+        super(Critic, self).__init__(states, actions, hidden_layers, seed)
 
-        self.input_layer = nn.Linear(self.n_states, self.hidden_layer[0])
-        layer_list = [nn.Linear(self.hidden_layer[0] + actions, self.hidden_layer[1])]
+        self.input_layer = nn.Linear(self.n_states, self.hidden_layers[0])
+        self.output_layer = nn.Linear(self.hidden_layers[-1], 1)
+        layer_list = [nn.Linear(self.hidden_layers[0] + actions, self.hidden_layers[1])]
         layer_list += [
-            nn.Linear(l_sz_prev, l_sz) for l_sz_prev, l_sz in zip(self.hidden_layer[1:-1], self.hidden_layer[2:])
+            nn.Linear(l_sz_prev, l_sz) for l_sz_prev, l_sz in zip(self.hidden_layers[1:-1], self.hidden_layers[2:])
             ]
         self.hidden_layers = nn.ModuleList(layer_list)
-        self.output_layer = nn.Linear(self.hidden_layer[-1], 1)
 
         self.reset_parameters()
 

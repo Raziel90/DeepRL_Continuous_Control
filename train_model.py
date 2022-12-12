@@ -1,5 +1,5 @@
 from unityagents import UnityEnvironment
-from src.agents import Agent
+from src.agent import Agent, DDPGAgent
 from src.environment import Execution_Manager
 from random import randint
 from src import package_path
@@ -24,4 +24,5 @@ if __name__ == '__main__':
     states_dim = len(env_info.vector_observations[0])
     action_dim = brain.vector_action_space_size
 
-    agent = Agent(state_size=states_dim, action_size=action_dim, hidden_size=LAYERS, seed=0)
+    agent = DDPGAgent(state_size=states_dim, action_size=action_dim, hidden_size=LAYERS, seed=0)
+

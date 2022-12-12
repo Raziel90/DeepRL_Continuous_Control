@@ -18,7 +18,66 @@ LR_CRITIC = 1e-3        # learning rate of the critic
 WEIGHT_DECAY = 0        # L2 weight decay
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-class DDPGAgent():
+
+
+class Agent():
+
+    def __init__(self, state_size, action_size, hidden_size=None, seed=0, **kwargs):
+        raise NotImplementedError()
+        
+    @classmethod
+    def from_file(cls, filename):
+        """Builds the Agent from file
+
+        Args:
+            data (dict): dict representation of the agent
+
+        Returns:
+            Agent: agent object correspondent to the parameters
+        """
+        data = torch.load(filename)
+        obj = cls.from_dict(data)
+        obj.qnetwork_local.load_state_dict(data['weights'])
+        return obj
+    
+    @classmethod
+    def from_dict(cls, data):
+        """Builds the Agent from a dict representation of the agent
+
+        Args:
+            data (dict): dict representation of the agent
+
+        Returns:
+            Agent: agent object correspondent to the parameters
+        """
+        return cls(data['state_size'], data['action_size'], data['hidden_layer_sizes'], **data['kwargs'])
+
+    def to_dict(self):
+        """Extrapolates agent's parameter and hyper-parameters and organises them in a dict object
+
+        Returns:
+            dict: dict representation of the agent
+        """
+        data = {
+            'state_size': self.state_size,
+            'action_size': self.action_size,
+            'hidden_layer_sizes': self.hidden_layer_sizes,
+            'weights': self.qnetwork_local.state_dict(),
+            'seed': self.qnetwork_local.seed.seed(),
+            'kwargs': {'dueling': self.dueling_networks}
+        }
+        return data
+
+    def save_model(self, filename):
+        """Saves the agent on a file
+
+        Args:
+            filename (str): path to the file to save
+        """
+        data = self.to_dict()
+        torch.save(data, filename)
+
+class DDPGAgent(Agent):
 
     def __init__(self, state_size, action_size, hidden_size=None, seed=0, **kwargs):
 
@@ -28,12 +87,12 @@ class DDPGAgent():
         self.state_size = state_size
         self.action_size = action_size
 
-        self.actor_local = Actor(state_size, action_size, seed=self.seed, hidden_size=[24, 48]).to(device)
-        self.actor_target = Actor(state_size, action_size, seed=self.seed, hidden_size=[24, 48]).to(device)
+        self.actor_local = Actor(state_size, action_size, seed=self.seed, hidden_layers=[24, 48]).to(device)
+        self.actor_target = Actor(state_size, action_size, seed=self.seed, hidden_layers=[24, 48]).to(device)
         self.actor_optimizer = optim.Adam(self.actor_local.parameters(), lr=LR_ACTOR)
 
-        self.critic_local = Critic(state_size, action_size, seed=seed, hidden_size=[24, 48]).to(device)
-        self.critic_target = Critic(state_size, action_size, seed=seed, hidden_size=[24, 48]).to(device)
+        self.critic_local = Critic(state_size, action_size, seed=seed, hidden_layers=[24, 48]).to(device)
+        self.critic_target = Critic(state_size, action_size, seed=seed, hidden_layers=[24, 48]).to(device)
         self.critic_optimizer = optim.Adam(self.critic_local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY)
 
         self.memory = PrioritizedReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, seed)
