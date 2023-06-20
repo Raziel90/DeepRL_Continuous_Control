@@ -98,7 +98,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         p = np.power(self.priorities, a)/ np.power(self.priorities, a).sum()
         sample_idx = random.choices(np.arange(len(self.priorities)), k=self.batch_size, weights=p)
         state = torch.from_numpy(np.vstack([self.memory[i].state for i in sample_idx])).float().to(device)
-        action = torch.from_numpy(np.vstack([self.memory[i].action for i in sample_idx])).long().to(device)
+        action = torch.from_numpy(np.vstack([self.memory[i].action for i in sample_idx])).float().to(device)
         reward = torch.from_numpy(np.vstack([self.memory[i].reward for i in sample_idx])).float().to(device)
         next_state = torch.from_numpy(np.vstack([self.memory[i].next_state for i in sample_idx])).float().to(device)
         done = torch.from_numpy(np.vstack([self.memory[i].done for i in sample_idx]).astype(np.uint8)).float().to(device)
