@@ -101,7 +101,6 @@ ACTIVATION = nn.ReLU
 class DDPG_Agent(Agent):
     def __init__(
             self, env: UnityEnvironment,
-            # state_size, action_size, 
             network_config=None, seed=None, **kwargs):
         
         self.brain_name = env.brain_names[0]
@@ -119,7 +118,7 @@ class DDPG_Agent(Agent):
         self.batch_size = network_config.get('batch_size', BATCH_SIZE)
 
         self.gamma = kwargs.get('gamma', GAMMA)
-        self.update_every = kwargs.get('update_every', UPDATE_EVERY)
+        # self.update_every = kwargs.get('update_every', UPDATE_EVERY)
         self.buffer_size = kwargs.get('buffer_size', BUFFER_SIZE)
         self.tau = kwargs.get('tau', TAU)
 
@@ -241,6 +240,8 @@ class DDPG_Agent(Agent):
         for param in self.actor_critic.q.parameters():
             param.requires_grad = True
 
+        print(f"critic loss: {loss_q.detach().numpy()}")
+        print(f"actor loss: {loss_pi.detach().numpy()}")
         self.soft_update()
     
     def compute_loss_q(self, batch):
