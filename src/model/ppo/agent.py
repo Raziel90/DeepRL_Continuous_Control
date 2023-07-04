@@ -1,12 +1,12 @@
 
-from typing import Dict, Tuple
-from unityagents import UnityEnvironment
-import torch
-from torch import nn
-import numpy as np
 import logging
-from network import Policy
+from typing import Dict, Tuple
 
+import numpy as np
+import torch
+from network import Policy
+from torch import nn
+from unityagents import UnityEnvironment
 
 DEFAULT_HIDDEN_SIZES = [256, 256]
 DEFAULT_ACTION_SCALE = 1.
@@ -26,6 +26,8 @@ class PPOAgent():
         self.__brain_name = env.brain_names[0]
         self.__brain = env.brains[self.__brain_name]
         env_info = self.env.reset(train_mode=True)[self.__brain_name]
+
+        self.n_threads = len(env_info.agents)
         self.state_size = env_info.vector_observations.shape[1]
         self.action_size = self.__brain.vector_action_space_size
         self.action_std_min = action_std_min
@@ -36,11 +38,13 @@ class PPOAgent():
         network_config.setdefault('hidden_activation', DEFAULT_HIDDEN_ACTIVATION)
         network_config.setdefault('output_activation', DEFAULT_OUTPUT_ACTIVATION)
         network_config.setdefault('action_std', DEFAULT_ACTION_STD_INIT)
+        network_config.setdefault('single_network', False)
 
         self.policy = Policy(self.state_size, self.action_size, **network_config)
 
         LOGGER.info('\t' + '-' * 31 + ' Params ' + '-' * 31)
         LOGGER.info(f'\tState dimension: {self.state_size}\t Action dimension: {self.action_size}\t Action Limit: {self.policy.action_limit}')
+        LOGGER.info(f'\tAgent Threads: {self.n_threads}')
         LOGGER.info(f'\tNetwork hidden units: {network_config.get("hidden_sizes")} -> Total hidden weights: {np.prod(network_config.get("hidden_sizes"))}')
         LOGGER.info(f'\tNetwork hidden activations: {network_config.get("hidden_activation")}')
         LOGGER.info(f'\tNetwork output activation: {network_config.get("output_activation")}')
@@ -48,19 +52,19 @@ class PPOAgent():
 
     @classmethod
     def from_file(cls, env: UnityEnvironment, network_state_path:str, action_std_min=1e-6, seed=None):
-        
+
         policy_config = torch.load(network_state_path)
         network_config = {key: item for key, item in policy_config.items() if key != 'network'}
-            
+
         agent = cls(env, action_std_min, network_config, seed)
         agent.policy.set_state(policy_config)
         return agent
-    
+
     def save_agent(self, path: str):
         self.policy.save_model(path=path)
-    
+
     def get_action(self, state: torch.Tensor, random: bool=False) -> Tuple[torch.Tensor, torch.Tensor]:
-        
+
         if random == False:
             action, log_prob, _ = self.policy.act(state)
         else:
@@ -69,24 +73,24 @@ class PPOAgent():
             action = distro.sample()
             log_prob = distro.log_prob(action).sum(dim=1)
         return action, log_prob
-    
+
     def get_value(self, state: torch.Tensor) -> torch.Tensor:
         return self.policy.V(state)
-    
+
     def decay_action_std(self, decay_rate: float):
         self.policy.action_std = max(self.action_std_min, self.policy.action_std * decay_rate)
 
     def act(self, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         clipped_action = np.clip(action.numpy(), -self.policy.action_limit, self.policy.action_limit)
-        env_info = self.env.step(clipped_action)[self.__brain_name] 
+        env_info = self.env.step(clipped_action)[self.__brain_name]
         new_state = torch.from_numpy(env_info.vector_observations).float()   # get the next state
-        reward = torch.tensor(env_info.rewards, dtype=torch.float).unsqueeze(0)                   # get the reward
+        reward = torch.tensor(np.asarray(env_info.rewards)[:, None], dtype=torch.float)                 # get the reward
         done = torch.tensor([env_info.local_done], dtype=torch.float)
-        
+
         return new_state, reward, done
 
     def run_episode(self, max_steps: int, random_policy: bool = False, train_mode: bool=False):
-        
+
         env_info = self.env.reset(train_mode=train_mode)[self.__brain_name] # reset the environment
         state = torch.from_numpy(env_info.vector_observations).float()
         done = False
@@ -114,11 +118,11 @@ class PPOAgent():
             dones.append(done)
 
             state = new_state
-            if done: 
-                break            
-        
+            if done:
+                break
+
         return values, states, actions, rewards, dones
-    
+
 
 
 
