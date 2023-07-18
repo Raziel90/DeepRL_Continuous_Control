@@ -1,27 +1,31 @@
 
-import logging
-from typing import Dict, Tuple
-
-import numpy as np
 import torch
-from network import Policy
 from torch import nn
+from torch import distributions as dist
+from typing import Dict, TypeVar
 from unityagents import UnityEnvironment
+import numpy as np
+from scipy.stats import norm
+from tqdm import trange
 
-DEFAULT_HIDDEN_SIZES = [256, 256]
+from .network import PPOPolicy
+
+DEFAULT_HIDDEN_SIZES = [256, 128]
 DEFAULT_ACTION_SCALE = 1.
 DEFAULT_HIDDEN_ACTIVATION = nn.ReLU
 DEFAULT_OUTPUT_ACTIVATION = nn.Tanh
-DEFAULT_ACTION_STD_INIT = 1e-2
 
-LOGGER = logging.getLogger(__name__)
+PPOAgent_Type = TypeVar("PPOAgent_Type", bound="PPOAgent")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-class PPOAgent():
+class PPOAgent:
 
-    def __init__(self, env: UnityEnvironment, action_std_min=1e-6,
-            network_config: Dict=None, seed=None):
-        if seed is not None:
-            torch.seed(seed)
+    def __init__(self, env: UnityEnvironment,
+            network_config: Dict=None, seed=None) -> None:
+
+        self.seed = np.random.seed(seed) if seed is not None else None
+
+
         self.env = env
         self.__brain_name = env.brain_names[0]
         self.__brain = env.brains[self.__brain_name]
@@ -30,104 +34,82 @@ class PPOAgent():
         self.n_threads = len(env_info.agents)
         self.state_size = env_info.vector_observations.shape[1]
         self.action_size = self.__brain.vector_action_space_size
-        self.action_std_min = action_std_min
 
         network_config = network_config if network_config is not None else dict()
-        network_config.setdefault('hidden_sizes', DEFAULT_HIDDEN_SIZES)
+
+        network_config.setdefault('actor_hidden_sizes', DEFAULT_HIDDEN_SIZES)
+        network_config.setdefault('critic_hidden_sizes', DEFAULT_HIDDEN_SIZES)
         network_config.setdefault('action_limit', DEFAULT_ACTION_SCALE)
         network_config.setdefault('hidden_activation', DEFAULT_HIDDEN_ACTIVATION)
         network_config.setdefault('output_activation', DEFAULT_OUTPUT_ACTIVATION)
-        network_config.setdefault('action_std', DEFAULT_ACTION_STD_INIT)
-        network_config.setdefault('single_network', False)
 
-        self.policy = Policy(self.state_size, self.action_size, **network_config)
-
-        LOGGER.info('\t' + '-' * 31 + ' Params ' + '-' * 31)
-        LOGGER.info(f'\tState dimension: {self.state_size}\t Action dimension: {self.action_size}\t Action Limit: {self.policy.action_limit}')
-        LOGGER.info(f'\tAgent Threads: {self.n_threads}')
-        LOGGER.info(f'\tNetwork hidden units: {network_config.get("hidden_sizes")} -> Total hidden weights: {np.prod(network_config.get("hidden_sizes"))}')
-        LOGGER.info(f'\tNetwork hidden activations: {network_config.get("hidden_activation")}')
-        LOGGER.info(f'\tNetwork output activation: {network_config.get("output_activation")}')
-        LOGGER.info('\t' + '-' * 70)
+        self.policy = PPOPolicy(self.state_size, self.action_size, seed=seed, **network_config)
 
     @classmethod
-    def from_file(cls, env: UnityEnvironment, network_state_path:str, action_std_min=1e-6, seed=None):
+    def clone_agent(cls, agent: PPOAgent_Type):
 
-        policy_config = torch.load(network_state_path)
-        network_config = {key: item for key, item in policy_config.items() if key != 'network'}
+        network_config = {
+            'action_limit': agent.policy.action_limit,
+            'actor_hidden_sizes': agent.policy.actor_hidden_sizes,
+            'critic_hidden_sizes': agent.policy.critic_hidden_sizes,
+            'hidden_activation': agent.policy.hidden_activation,
+            'output_activation': agent.policy.output_activation,
+            'seed': agent.seed
+            }
 
-        agent = cls(env, action_std_min, network_config, seed)
-        agent.policy.set_state(policy_config)
-        return agent
+        new_agent = cls(agent.env, network_config=network_config, seed=agent.seed)
+        new_agent.policy.load_state_dict(agent.policy.state_dict())
+        return new_agent
 
-    def save_agent(self, path: str):
-        self.policy.save_model(path=path)
+    def act(self, state: np.ndarray, noisy: bool=False) -> Tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
+        action, log_prob = self.policy.act(state, noisy)
+        env_info = self.env.step(action.cpu().detach().numpy())[self.__brain_name]
+        next_state = np.asarray(env_info.vector_observations)
+        reward = np.asarray(env_info.rewards)[:, None]
+        done = np.asarray(env_info.local_done).astype(np.int32)[:, None]
 
-    def get_action(self, state: torch.Tensor, random: bool=False) -> Tuple[torch.Tensor, torch.Tensor]:
+        return action, log_prob, next_state, reward, done
 
-        if random == False:
-            action, log_prob, _ = self.policy.act(state)
-        else:
-            ones = torch.ones(self.action_size)
-            distro = torch.distributions.Uniform(-self.policy.action_limit * ones, self.policy.action_limit * ones)
-            action = distro.sample()
-            log_prob = distro.log_prob(action).sum(dim=1)
-        return action, log_prob
+    def random_act(self, state: Union[np.ndarray, torch.Tensor]):
+        action = np.random.uniform(low=-self.policy.action_limit, high=self.policy.action_limit, size=(self.n_threads, self.action_size))
+        log_prob = (
+            norm(np.zeros((self.n_threads, self.action_size)), np.ones((self.n_threads, self.action_size)))
+            .logpdf(action)).sum(axis=1)
+        action_distr = dist.Normal(torch.from_numpy(action).float(), self.policy.log_std.exp().detach())
+        action = torch.clamp(action_distr.sample(), -self.policy.action_limit, self.policy.action_limit).detach()
 
-    def get_value(self, state: torch.Tensor) -> torch.Tensor:
-        return self.policy.V(state)
+        env_info = self.env.step(action.numpy())[self.__brain_name]
+        log_prob = action_distr.log_prob(action).sum(dim=1).detach()
 
-    def decay_action_std(self, decay_rate: float):
-        self.policy.action_std = max(self.action_std_min, self.policy.action_std * decay_rate)
+        next_state = np.asarray(env_info.vector_observations)
+        reward = np.asarray(env_info.rewards)[:, None]
+        done = np.asarray(env_info.local_done).astype(np.int32)[:, None]
 
-    def act(self, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        clipped_action = np.clip(action.numpy(), -self.policy.action_limit, self.policy.action_limit)
-        env_info = self.env.step(clipped_action)[self.__brain_name]
-        new_state = torch.from_numpy(env_info.vector_observations).float()   # get the next state
-        reward = torch.tensor(np.asarray(env_info.rewards)[:, None], dtype=torch.float)                 # get the reward
-        done = torch.tensor([env_info.local_done], dtype=torch.float)
+        return action, log_prob, next_state, reward, done
 
-        return new_state, reward, done
-
-    def run_episode(self, max_steps: int, random_policy: bool = False, train_mode: bool=False):
-
-        env_info = self.env.reset(train_mode=train_mode)[self.__brain_name] # reset the environment
-        state = torch.from_numpy(env_info.vector_observations).float()
-        done = False
-        values = []
-        states = []
-        actions = []
+    def run_test_episode(self, max_steps: int = 1000, track_progress: bool = False, noisy: bool=False) -> np.ndarray:
+        """Runs a test episode."""
         rewards = []
-        dones = []
-        for t in range(max_steps):
-
-            action, log_prob = self.get_action(state, random=random_policy)
-            value = self.get_value(state)
-            new_state, reward, done = self.act(action)
-            # env_info = self.env.step(action.numpy())[self.__brain_name]        # send the action to the environment
-
-            # new_state = env_info.vector_observations[0]   # get the next state
-            # reward = env_info.rewards[0]                   # get the reward
-            # done = env_info.local_done[0]
-            # trajectory.append((state, action, new_state, reward, values))
-
-            values.append(value)
-            states.append(state)
-            actions.append(action)
-            rewards.append(reward)
-            dones.append(done)
-
-            state = new_state
-            if done:
+        env_info = self.env.reset(train_mode=False)[self.__brain_name] # reset the environment
+        state = np.asarray(env_info.vector_observations)
+        pbar = trange(max_steps) if track_progress else range(max_steps)
+        for _ in pbar:
+            action, log_prob, next_state, reward, done = self.act(state, noisy)
+            value = self.policy.state_value(state).detach().numpy()
+            state = next_state
+            rewards.append(reward.squeeze())
+            if track_progress:
+                pbar.set_description(f"Mean Cumulative Reward: {np.sum(rewards, axis=0).mean():.2f}")
+            if np.array(done).astype(bool).any():
                 break
 
-        return values, states, actions, rewards, dones
+        return np.array(rewards).sum(axis=0)
 
 
+if __name__ == '__main__':
 
+    env = UnityEnvironment(file_name='/Users/claudcop/code/deep-rl/DeepRL_Continuous_Control/unity/Reacher20.app', no_graphics=False)
 
-if __name__ == "__main__":
-    env = UnityEnvironment(file_name='/Users/claudiocoppola/code/RL_repos/Reacher.app', no_graphics=True)
-    agent = PPOAgent(env)
-    values, states, actions, rewards, masks = agent.run_episode(100)
-    print(sum(rewards))
+    agent = PPOAgent(env, seed=4)
+    agent.run_test_episode(max_steps=1000, track_progress=True)
+    print('END!')

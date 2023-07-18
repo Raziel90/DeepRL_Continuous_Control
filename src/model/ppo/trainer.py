@@ -1,282 +1,307 @@
-import torch
-from torch import nn
 import logging
+from tqdm import trange
+from torch import optim
+import torch
 import numpy as np
-from tqdm import tqdm
+from collections import namedtuple
+from typing import List
+
+from .agent import PPOAgent
+from .buffer import TrainingBuffer, RolloutExperience, RolloutMemory
 from collections import deque
-import torch.optim as optim
-import torch.nn.functional as F
-
-from unityagents import UnityEnvironment
-from agent import PPOAgent
 
 
+CRITIC_WEIGHT_DECAY = 2e-6
+BATCH_SIZE = 512
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 LOGGER = logging.getLogger(__name__)
 
-class TrainingBuffer():
-    def __init__(self, device):
-
-        self.__actions = []
-        self.__states = []
-        self.__action_log_probs = []
-        self.__rewards = []
-        self.__state_values = []
-        self.__dones = []
-        self.device = device
-
-    def append(self, action, state, log_prob, reward, value, done):
-
-        self.__state_values.append(value)
-        self.__rewards.append(reward)
-        self.__dones.append(done)
-        self.__action_log_probs.append(log_prob)
-        self.__states.append(state)
-        self.__actions.append(action)
-
-    def clear(self):
-        del self.__actions[:]
-        del self.__states[:]
-        del self.__action_log_probs[:]
-        del self.__state_values[:]
-        del self.__rewards[:]
-        del self.__dones[:]
-
-    def __len__(self):
-        return len(self.__rewards)
-
-    def get_batch(self):
-        return (self.actions, self.states, self.log_probs, self.state_values, self.rewards, self.dones)
-
-    @property
-    def actions(self):
-        return torch.cat(self.__actions, dim=0).to(self.device)
-
-    @property
-    def states(self):
-        return torch.cat(self.__states, dim=0).to(self.device)
-
-    @property
-    def log_probs(self):
-        return torch.cat(self.__action_log_probs, dim=0).to(self.device).detach()
-
-    @property
-    def state_values(self):
-        return torch.cat(self.__state_values).to(self.device).detach()
-
-    @property
-    def rewards(self):
-        return torch.cat(self.__rewards).to(self.device)
-
-    @property
-    def dones(self):
-        return torch.cat(self.__dones).to(self.device)
+class PPOTrainer:
+    def __init__(self, agent: PPOAgent, learning_rate_actor: float = 1e-3, learning_rate_critic: float = 1e-3, epsilon_clip:float=0.1, beta: float=1e-3,
+                 rollout_length: int = 1000, batch_size=1024, gamma: float = 0.99, gae_lambda: float = 1.0, training_epochs: int = 10,
+                 filename='PPO.pth', filepath='./') -> None:
+        """
+        PPO Trainer class.
 
 
-class PPOTrainer():
-    def __init__(self, agent: PPOAgent, learning_rate: float=1e-3, training_epochs: int=10,
-                 gamma: float=0.99, epsilon_clip: float=.1, beta: float = 1e-3, std_decay_rate=(1-5e-3),
-                 use_normalized_advantage: bool=True, use_generalized_advantage: bool=True, gae_lambda=0.7):
+        Parameters
+        ----------
+        agent : PPOAgent
+            Agent to train with PPO
+        learning_rate_actor : float, optional
+            learning rate used to optimize the actor network, by default 1e-3
+        learning_rate_critic used to optimize the critic network: float, optional
+            learning rate , by default 1e-3
+        epsilon_clip : float, optional
+            PPO epsilon paramenter, by default 0.1
+        beta : float, optional
+            entropy bonus coefficient, by default 1e-3
+        rollout_length : int, optional
+            minimum amount of samples that should in a rollout, by default 1000
+        batch_size : int, optional
+            length of the minibatches, by default 1024
+        gamma : float, optional
+            discount factor, by default 0.99
+        gae_lambda : float, optional
+            lambda of the generalized advantage estimation, by default 1.0
+        training_epochs : int, optional
+            number of epochs to train with at every update, by default 10
+        filename : str, optional
+            filename of the network checkpoint, by default 'PPO.pth'
+        filepath : str, optional
+            path of the checkpoint, by default './'
+        """
 
         self.agent = agent
-        if self.agent.policy.single_network:
-            self.optimizer = optim.Adam([
-                {'params': self.agent.policy.stub.parameters(), 'lr': learning_rate},
-                {'params': self.agent.policy.actor_head.parameters(), 'lr': learning_rate},
-                {'params': self.agent.policy.critic_head.parameters(), 'lr': learning_rate}
-                ])
-        else:
-            self.optimizer = optim.Adam([
-                {'params': self.agent.policy.pi.parameters(), 'lr':learning_rate},
-                {'params': self.agent.policy.V.parameters(), 'lr':learning_rate}
-                ])
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        self.epsilon_clip = epsilon_clip
         self.gamma = gamma
-        self.training_epochs = training_epochs
-        self.use_normalized_advantage = use_normalized_advantage
-        self.use_generalized_advantage = use_generalized_advantage
-        self.gae_lambda = gae_lambda if use_generalized_advantage else None
         self.beta = beta
-        self.buffer = TrainingBuffer(self.device)
-        self.__debug = False
-
-        self.std_decay_rate = std_decay_rate
+        self.n_epochs = training_epochs
+        self.batch_size = batch_size
+        self.rollout_length = rollout_length
+        self.epsilon_clip = epsilon_clip
+        self.filename = filename
+        self.filepath = filepath
+        self.gae_lambda = gae_lambda
+        self.buffer = TrainingBuffer()
 
         self.scores = []
-        self.scores_deque = deque(maxlen=100)
+        self.score_queue = deque(maxlen=100)
 
-        self.agent.policy.to(self.device)
+        self.optimizer = optim.Adam([
+            {"params": self.agent.policy.pi.parameters(), "lr": learning_rate_actor, "weight_decay": CRITIC_WEIGHT_DECAY},
+            {"params": self.agent.policy.V.parameters(), "lr": learning_rate_critic, "weight_decay": CRITIC_WEIGHT_DECAY},
+            {"params": self.agent.policy.log_std, "lr": 1e-3}])
+
         self.__brain_name = self.agent.env.brain_names[0]
         self.__brain = self.agent.env.brains[self.__brain_name]
 
-        LOGGER.info('\t' + '-' * 31 + ' Params ' + '-' * 31)
-        LOGGER.info(f'\tEpsilon clip: {self.epsilon_clip}\t Gamma: {self.gamma}\t Learning Rate: {learning_rate}')
-        LOGGER.info(f'\tTraining epochs: {self.training_epochs} ')
-        LOGGER.info(f'\tUsing Normalized Advantage: {self.use_normalized_advantage} ')
-        LOGGER.info(f'\tUsing General Advantage Estimation: {self.use_generalized_advantage} ')
-        LOGGER.info('\t' + '-' * 70)
+    def train(self, n_episodes: int, max_steps_per_episode: int, target: float = 30.) -> PPOAgent:
+        """begins the training of the agent.
+        Terminates when the 100 episode mean of at least one agent reaches the target or
+        when interruption signal is received.
 
-    def toggle_debug(self):
-        self.__debug = not self.__debug
-        state_string = 'ON' if self.__debug else 'OFF'
-        LOGGER.setLevel(logging.DEBUG if self.__debug else logging.INFO)
-        LOGGER.debug(f'Debug mode is : {state_string}')
+        Parameters
+        ----------
+        n_episodes : int
+            The maximum number of episodes to train on
+        max_steps_per_episode : int
+            max number of steps to perform within an episode
+        target : float, optional
+            target score to stop training at, by default 30.
 
-    def update(self):
-
-        old_states = self.buffer.states
-        old_actions = self.buffer.actions
-        old_log_probs = self.buffer.log_probs
-        old_state_values = self.buffer.state_values
-
-        if self.use_generalized_advantage:
-            returns, advantages = self.compute_general_advantage()
-
-        else:
-            returns = self.compute_MCreturns()
-
-            returns = self.normalize(returns)
-            advantages = returns.detach() - old_state_values
-
-        if self.use_normalized_advantage:
-            # advantages = self.normalize(advantages)
-            returns = self.normalize(returns)
-
-        for epoch in range(self.training_epochs):
-
-            new_log_probs, new_state_values, dist_entropy = self.agent.policy.evaluate(old_states, old_actions)
-
-            ratio = torch.exp(new_log_probs - old_log_probs.detach())
-
-            surrogate1 = ratio * advantages
-            surrogate2 = torch.clamp(ratio, 1 - self.epsilon_clip, 1 + self.epsilon_clip) * advantages
-            actor_loss = -torch.min(surrogate1, surrogate2)
-
-            critic_loss = F.mse_loss(new_state_values.squeeze(), returns.squeeze())
-
-            loss = actor_loss + 0.5 * critic_loss - self.beta * dist_entropy.mean()
-
-            self.optimizer.zero_grad()
-            loss.mean().backward()
-            self.optimizer.step()
-
-            self.buffer.clear()
-            if self.__debug:
-                LOGGER.debug(f'\tEpoch: {epoch}, actor_loss: {actor_loss.mean():.6f}, critic_loss: {critic_loss.mean():.6f}, entropy_bonus: {dist_entropy.mean():.6f}')
-                # LOGGER.debug(f'\tEpoch: {epoch}, gradient norm {torch.norm(self.agent.policy.stub[0].weight.grad, 2):.4f}')
-                # LOGGER.debug(f'surrogate1: {surrogate1}, surrogate_clipped: {surrogate2}')
-
-
-    def compute_MCreturns(self) -> torch.Tensor:
-        rewards = self.buffer.rewards
-        dones = self.buffer.dones
-        returns = torch.zeros_like(rewards)
-        R = 0
-        for step in (reversed(range(len(rewards)))):
-            R = rewards[step] + (self.gamma * R * (1 - dones[step]))
-            returns[step] = R
-        return returns
-
-    def compute_general_advantage(self):
-        assert(self.gae_lambda is not None, "If compute_general_advantage is set to True a gae_lambda value should be provided")
-        rewards = self.buffer.rewards
-        values = self.buffer.state_values
-        advantages = torch.zeros_like(rewards).to(self.device)
-        gae = next_value = 0.
-        for step in reversed(range(len(rewards))):
-            delta = rewards[step] + self.gamma * next_value - values[step]
-            advantages[step] = gae = delta + self.gamma * self.gae_lambda * gae
-            next_value = values[step]
-
-        returns = advantages + values
-        return returns, advantages
-
-
-    def normalize(self, batch:torch.Tensor, non_zero_eps: float=1e-8):
-
-        mean = torch.mean(batch)
-        stdev = torch.std(batch) + non_zero_eps
-
-        return (batch - mean) / stdev
-
-    def reset(self):
-        del self.scores[:]
-        del self.scores_deque[:]
-
-    def train(self, n_episodes: int=1000, max_t: int=100, update_every: int=200, print_every: int=100, target:float = 30.):
-
-        LOGGER.info('\t' + '-' * 30 + ' Training ' + '-' * 30)
-        LOGGER.info(f'\tN Episodes {n_episodes} , max length episode: {max_t}')
-        LOGGER.info(f'\tUpdate every {update_every} steps')
-        LOGGER.info(f'\tPrint every {print_every} episodes')
-        LOGGER.info(f'\tTarget score: {target}')
-        LOGGER.info('\t' + '-' * 70)
-        # self.scores_deque = deque(maxlen=100)
-        # self.scores = []
-        pbar = tqdm(total=print_every)
-        for episode in range(1, n_episodes + 1):
+        Returns
+        -------
+        PPOAgent
+            Trained Agent
+        """
+        pbar = trange(n_episodes, desc='Training', unit='episodes', leave=True)
+        pbar.set_description(
+                f"Episode {0}: Exploration std mean: {0.:.2f}, "
+                f"Score: {0.:.2f}, "
+                f"100 episode Mean Score: {0.:.2f}")
+        for episode in pbar:
             try:
-                rewards = self.run_training_episode(max_t, update_every)
+                score = self.run_training_episode(max_steps_per_episode=max_steps_per_episode)
+                self.scores.append(score)
+                self.score_queue.append(score)
+                if len(self.buffer) >= self.rollout_length:
+                    self.update_policy()
+                    self.buffer.reset()
 
-                self.scores.append(np.sum(rewards, axis=0).mean())
-                self.scores_deque.append(np.sum(rewards, axis=0))
-
-                if episode % print_every == 0:
-                    pbar.clear()
-                    LOGGER.info(f'\t ---> Episode\t {episode}\tAverage Score: {np.array(scores_deque)[-print_every:].mean():.2f}')
-                    pbar.reset()
-                    # pbar = tqdm(print_every)
-                else:
-                    pbar.update(1)
-                if (np.mean(self.scores_deque, axis=0) >= target).any():
-                    LOGGER.info(f'\tEnvironment solved in {episode:d} episodes!\tAverage Score: {np.mean(scores_deque):.2f}')
-                    break
             except KeyboardInterrupt:
-                pbar.clear()
                 pbar.close()
-                LOGGER.info(f"\tTraining Interrupted at episode {episode}")
+                LOGGER.info(f"\tTraining Interrupted at episode {len(self.scores)}")
                 break
-        return scores
 
-    def run_training_episode(self, max_t: int, update_every: int) -> np.array:
+            finally:
+                if np.any(np.mean(self.score_queue, axis=0) >= target) and len(self.score_queue) > 100:
+                    LOGGER.info(f"\tTraining Complete at episode {len(self.scores)}")
+                    break
+
+            pbar.set_description(
+                f"Episode {episode + 1}: Exploration std mean: {(self.agent.policy.log_std.exp().data.mean()):.2f}, "
+                f"Score: {score.mean():.2f}, "
+                f"100 episode Mean Score: {np.mean(self.score_queue, axis=0).mean():.2f}")
+
+        return self.agent
+
+    def run_training_episode(self, max_steps_per_episode: int) -> np.ndarray:
+        """Runs one training episode
+
+        Parameters
+        ----------
+        max_steps_per_episode : int
+            maximum number of steps to perform in the episode
+
+        Returns
+        -------
+        np.ndarray
+            (1 X n_thread) array of scores for the episode
+
+        """
         env_info = self.agent.env.reset(train_mode=True)[self.__brain_name] # reset the environment
-        state = torch.from_numpy(env_info.vector_observations).float()
+        state = np.asarray(env_info.vector_observations)
+
         done = False
-
+        rollout = [RolloutExperience() for _ in range(self.agent.n_threads)]
         rewards = []
-        for t in range(max_t):
-            action, log_prob = self.agent.get_action(state)
-            next_state, reward, done = self.agent.act(action)
-            state_value = self.agent.get_value(state)
-
-            rewards.append(np.asarray(reward).squeeze())
-            self.buffer.append(
-                action, state, log_prob,
-                reward, state_value, done)
-
+        for _ in range(max_steps_per_episode):
+            action, log_prob, next_state, reward, done = self.agent.act(state, noisy=True)
+            value = self.agent.policy.state_value(state).detach().numpy()
+            for thread in range(self.agent.n_threads):
+                rollout[thread].state.append(state[thread, :][None, :])
+                rollout[thread].value.append(value[thread])
+                rollout[thread].action.append(action[thread, :][None, :])
+                rollout[thread].log_prob.append(log_prob[thread].unsqueeze(0))
+                rollout[thread].reward.append(reward[thread])
+                rollout[thread].done.append(done[thread])
             state = next_state
-            if len(self.buffer) >= update_every:
-                LOGGER.debug(f'\tUpdating the nework ...')
-                self.update()
-                self.agent.decay_action_std(self.std_decay_rate)
-            if done.numpy().astype(bool).any():
+            rewards.append(reward.squeeze())
+            if np.array(done).astype(bool).any():
                 break
+        incumbent_value = self.agent.policy.state_value(state).detach().numpy()
 
-        return np.concatenate(rewards)
+        for thread, roll in enumerate(rollout):
+            roll.reward = np.array(roll.reward)
+            roll.reward = (roll.reward - np.mean(roll.reward)) / (np.std(roll.reward) + 1e-6)
+            advantage = torch.from_numpy(self.compute_general_advantage(roll, incumbent_value[thread], True)).float()
+            values = torch.from_numpy(np.concatenate(roll.value, axis=0)).float()
+            memory = RolloutMemory(
+                states=torch.from_numpy(np.concatenate(roll.state, axis=0)).float(),
+                actions=torch.cat(roll.action, dim=0),
+                log_probs=torch.cat(roll.log_prob, dim=0).float(),
+                advantages=advantage,
+                returns=advantage + values
+            )
+            self.buffer.add(memory)
 
+        return np.array(rewards).sum(axis=0)
+
+    def compute_general_advantage(self, rollout: RolloutExperience, last_value: float=0.0, normalize: bool=True) -> np.ndarray:
+        """computes GAE starting from the rollout and the estimate of the value
+        of the final state. if normalize is True, the advantages are normalized
+        by the standard deviation of the advantages used in the update_policy function.
+        The advantages are computed in reverse order as follows:
+        advantages[t] = rewards[t] + gamma * value[t + 1] * (1 - done[t]) - value[t]
+        where value[t + 1] is the estimate of the value of the state at time t + 1.
+
+        Parameters
+        ----------
+        rollout :
+            list of RolloutExperience
+        last_value : float, optional
+            the value of the last state reached during the rollout, by default 0.0
+        normalize : bool, optional
+            if true the advantage is normalized, by default True
+
+        Returns
+        -------
+        np.ndarray
+            (1 X n_thread) array of advantages for the rollout
+
+        Examples
+        --------
+        >>> rollout = RolloutExperience()
+        >>> rollout.reward = [1, 2, 3]
+        >>> rollout.value = [1, 2, 3]
+        >>> rollout.done = [False, False, True]
+        >>> compute_general_advantage(rollout, normalize=False)
+        array([ 0.,  1.,  2.])
+        >>> compute_general_advantage(rollout, normalize=True)
+        array([ 0.        ,  0.66666667,  1.33333333])
+
+        """
+        advantages = np.zeros((len(rollout.reward)))
+
+        gae = next_value = last_value
+        for step in reversed(range(len(rollout.reward))):
+            delta = rollout.reward[step] + self.gamma * next_value * (1 - rollout.done[step]) - rollout.value[step]
+            advantages[step] = gae = delta + self.gamma * self.gae_lambda * gae
+            next_value = rollout.value[step]
+
+        if normalize:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)#max(advantages.std(), 1e-4)
+        return advantages
+
+    def update_policy(self) -> None:
+        """
+        Updates the policy using the buffer.
+        The update is done for n_epochs number of epochs.
+        The loss is computed as follows:
+        loss = actor_loss + 0.5 * critic_loss - beta * entropy
+        where actor_loss is the negative of the mean of the surrogate of the ratio
+        between the new log probability and the old log probability.
+        critic_loss is the negative of the mean of the difference between the
+        new state value and the old state value.
+        The entropy is the negative of the mean of the entropy of the policy.
+        The update is done using the Adam optimizer.
+        The loss is also printed in the progress bar.
+
+        Examples
+        --------
+        >>> trainer = Trainer(agent, buffer)
+        >>> trainer.update_policy()
+
+        Notes
+        -----
+        The loss is computed using the Adam optimizer.
+        The loss is also printed in the progress bar.
+
+        References
+        ----------
+        [1] https://arxiv.org/abs/1707.06347
+
+        Returns
+        -------
+        None.
+
+
+        """
+
+        batcher = self.buffer.get_dataset()
+        update_tracker = trange(self.n_epochs, desc='Updating Policy', leave=False, unit='epoch')
+        for _ in update_tracker:
+            batcher.restart()
+            cum_loss_total = 0.0
+            cum_loss_actor = 0.0
+            cum_loss_critic = 0.0
+            while batcher.batch_start < len(batcher):
+
+                (old_states, old_actions, old_log_probs, old_advantages, old_returns) = (
+                    batcher.next_batch(self.batch_size))
+
+                new_log_probs, entropy = self.agent.policy.action_prob(old_states, old_actions)
+                new_state_values = self.agent.policy.state_value(old_states)
+                ratio = (new_log_probs - old_log_probs.detach()).exp()
+                surrogate1 = ratio * old_advantages.detach()
+                surrogate2 = torch.clamp(ratio, 1 - self.epsilon_clip, 1 + self.epsilon_clip) * old_advantages.detach()
+                actor_loss = - torch.min(surrogate1, surrogate2).mean()
+                critic_loss = (new_state_values.squeeze() - old_returns.squeeze()).pow(2).mean()
+
+                loss = actor_loss + 0.5 * critic_loss - self.beta * entropy.mean()
+                cum_loss_total += loss.mean().item()
+                cum_loss_actor += actor_loss.mean().item()
+                cum_loss_critic += critic_loss.mean().item()
+
+
+                self.optimizer.zero_grad()
+                loss.backward()
+
+                self.optimizer.step()
+
+            update_tracker.set_description(
+                "Loss - "
+                f"Total: {cum_loss_total:.2f}"
+                f" Critic: {cum_loss_critic:.2f}"
+                f" Actor: {cum_loss_actor:.2f}"
+                )
 
 if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(15,5))
-    env = UnityEnvironment(file_name='/Users/claudiocoppola/code/RL_repos/Reacher.app', no_graphics=True)
-    agent = PPOAgent(env, network_config={'hidden_sizes':[256, 256], 'hidden_activation': nn.Tanh})
+    env = UnityEnvironment(file_name='/Users/claudcop/code/deep-rl/DeepRL_Continuous_Control/unity/Reacher20.app', no_graphics=True)
 
-    trainer = PPOTrainer(agent, gamma=0.3, epsilon_clip=0.2, training_epochs=30)
-    scores = trainer.train(n_episodes=10000, max_t=200)
-    ax.plot(scores)
-
-    plt.show()
-    # means, stds, values, states, actions, rewards, masks = agent.run_episode(100)
-    # print(sum(rewards))
+    agent = PPOAgent(env, seed=4)
+    agent.run_test_episode(max_steps=1000, track_progress=True)
+    trainer = PPOTrainer(agent, rollout_length=1000)
+    print('END!')

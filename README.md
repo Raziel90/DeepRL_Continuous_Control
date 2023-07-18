@@ -5,6 +5,7 @@
 ```
 torch==1.0.0
 numpy==1.19.5
+unityagents==0.4.0
 ```
 
 ## Section 2: Download the Unity Environment
