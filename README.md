@@ -101,6 +101,7 @@ This used implementation of the PPO algorithm uses the following modules:
 - learning rate for actor and critic of `1e-4` while it uses `1e-3` for training the std parameters.
 - We implement 2 different versions of the ReplayBuffer: with and without priority.
 - We use a discount factor $\gamma$ = `0.99` to improve the longtermism of the agent.
+- The Target network is updated from the local network with $\tau$ = `0.01`
 
 ## Section 4: Results
 The results of the training can be observed in the folders:
@@ -109,25 +110,56 @@ The results of the training can be observed in the folders:
 
 If you wish to see the trained agents in execution please use the `pretrained_demo.ipynb` notebook. It will load the models and run one episode of 1000 steps max.
 ### PPO
-Proximal Policy Optimization
+PPO reaches convergence quite fast, but it can result very sensitive to the hyperparameter values. In particular, too large learning rate or $\varepsilon$ values may lead to unstable learning procedures. The agent could start decreasing it's performance with time.
+That said, once well tuned the algorithm is quite fast in executing each learning episode and in its learning progress.
+With PPO the 20 Reacher problem could be stopped after 120 episodes of training. However, it could still continue improving.
+#### Proximal Policy Optimization - Early Stopped
 <img src="figures/PPO_early-stopped_Training_progression.png" alt="DDPG Training progression" style="border: 5px solid  gray; background: white">
 
+As shown below, the algorithm reaches the theoretical limit of the environment lacking the chance of further improvement. Here we can see that with less than 150 episodes the agent has very low variance in the execution performance.
+
+#### Proximal Policy Optimization - Convergence
 <img src="figures/PPO_Training_progression.png" alt="DDPG Training progression" style="border: 5px solid  gray; background: white">
 
+As can be seen below the agent trained with PPO behave quite nicely even when exploration variance is still present. That said in the execution tests we performed we can still notice some non smooth movements in the agent behaviour in some robot configurations.
+#### PPO - One training episode
 <div style="text-align: center;">
 <img src="figures/reacher20.gif" alt="DDPG Training progression" style="border: 5px solid  gray; background: white; width: 20em"></div>
 
-### DDPG
+### DDPG - Early stopped
+DDPG had a slower evolution. However, the different agents behaved more uniformly during the training than in the PPO case (There are many less individual spikes). That said the algorithm reached the target after 200 episodes.
 
+#### DDPG base-buffer-replay
 <img src="figures/DDPG_Training_progression.png" alt="DDPG Training progression" style="border: 5px solid gray; background: white; align: center">
+
+To improve the training we tried implement a priority mechanisms for the ReplayBuffer based on sample utilization.
+It did not seem to help particularly and slowed down the model execution significantly (20.42s/episode -> 63.82s/episode during training.).
+
+#### DDPG priority-buffer-replay
+<img src="figures/DDPG_priority_Training_progression.png" alt="DDPG Training progression" style="border: 5px solid gray; background: white; align: center">
 
 
 ## Section 5: Possible improvements
+### Environment/Problem
+- Continuously decrease the radius of the target sphere with the improvement of the performance. This will generate robots to reach accurately every point of the workspace.
+- Adding obstacles in the path to teach the algorithm to perform some obstacle avoidance behaviour. Perhaps this can be performed with an hierarchical agent (e.g. one generates the naive next step of the trajectory, another uses it as input to created a obstacle avoiding trajectory).
+- Increse the speed of the target after convergence (but keeping the max speed of the robot constant). I am curious to see how the agent adapts to fastly moving targets. It could be interesting to provide a forecasting module to the network capable to anticipate the target's behaviour.
+- Introducing a window of temporal entropy coefficient to the reward. I notice some little jumps in the execution of the environment. Perhaps this can avoid these jumpy movements in the local space.
+- I see how some agent like this one could be useful to learn "fast" trajectory planning for the robots. It would be interesting to observe the behaviour together with a robot teleoperation system. In particular, I think that robustness to noisy input can be a desirable aspect. Thus adding some noise to the observation space could make the policy more robust.
+
 ### PPO
+Possible improvements to the PPO algorithm are:
+- Testing additional forms of Normalization. For example it is proven that Normalizing the advantage on the minibatch level provides some benefit to the learning.
+- Annealing the $\varepsilon$, $\beta$ and learning rates of the optmization may provide additional stability to the learning procedure. having the learning rates all set to `1e-3` led to a reverse of the perfomance once close to convergence. Reducing their value while the training progresses may avoid this problem.
+- having the variance as output of the actor network rather than separate paramenters. This could generate specialized values for each observation and speed-up the exploration.
+
 ### DDPG
+- Changing the way priorities are calculated on the PriorityReplayBuffer. Some mechanisms based on the MSE of the Advantage estimation of the state or using the action probability to weight priories. Alternatively one could consider removing too similar samples in the buffer with some clustering mechanisms.
+- One interesting mechanisms would be using a self-supervised learning approach to learn a representation of the state-action-space that is more and more friendly to the agent to master.
+- Test alternative Exploration approaches to the Ornstein-Uhlenbeck process.
+- Faster approaches to compute the priority weights. Currently it slows down the training significantly
+
 ### Both
-
----
-The README describes the the project environment details (i.e., the state and action spaces, and when the environment is considered solved).
-
-The README has instructions for installing dependencies or downloading needed files.
+DDPG and PPO have both advantages and disadvantages. It would be interesting to try training the policy with both in different modalities:
+- Sequentially use DDPG to bootstrap the policy with previously collected samples.
+- Using the two approaches in parallel alternate steps (but Not sure on how to perform the update) could help condensate information from off-policy executions and on-policy improvements
