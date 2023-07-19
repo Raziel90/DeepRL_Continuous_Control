@@ -116,7 +116,8 @@ class PPOTrainer:
                 break
 
             finally:
-                if np.any(np.mean(self.score_queue, axis=0) >= target) and len(self.score_queue) > 100:
+                self.agent.to_file((self.filepath + '/' + self.filename))
+                if np.all(np.mean(self.score_queue, axis=0) >= target) and len(self.scores) > 100:
                     LOGGER.info(f"\tTraining Complete at episode {len(self.scores)}")
                     break
 

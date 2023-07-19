@@ -39,17 +39,70 @@ class RolloutMemory:
     rewards: torch.Tensor
     dones: torch.Tensor
     """
-    states: torch.Tensor
-    values: torch.Tensor
-    actions: torch.Tensor
-    log_probs: torch.Tensor
-    rewards: torch.Tensor
-    dones: torch.Tensor
+
     states: torch.Tensor
     actions: torch.Tensor
     log_probs: torch.Tensor
     advantages: torch.Tensor
     returns: torch.Tensor
+
+class Batcher:
+    """
+    Represents a rollout dataset for training the PPO agent.
+
+    """
+    def __init__(self, states: torch.Tensor, actions: torch.Tensor, log_probs: torch.Tensor, advantages: torch.Tensor, returns: torch.Tensor) -> None:
+        self.states = states
+        self.actions = actions
+        self.log_probs = log_probs
+        self.advantages = advantages
+        self.returns = returns
+
+        self.batch_idx = np.random.permutation(len(self))
+        self.batch_start = 0
+
+    def __len__(self) -> int:
+        """
+        Returns the number of samples in the dataset
+
+        Returns
+        -------
+        int
+            number of samples in the dataset
+        """
+
+        return int(self.returns.nelement())
+
+    def restart(self) -> None:
+        """
+        Clears the dataset
+        """
+
+        self.batch_idx = np.random.permutation(len(self))
+        self.batch_start = 0
+
+    def next_batch(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Returns the next batch of the dataset
+
+        Parameters
+        ----------
+        batch_size : int
+            size of the batch
+
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+            batch of states, actions, log_probs, advantages and returns
+        """
+
+        buffer_len = len(self)
+        batch_end = min(self.batch_start + batch_size, buffer_len)
+        idx = self.batch_idx[self.batch_start:batch_end]
+        self.batch_start = batch_end
+        return (self.states[idx, :], self.actions[idx, :], self.log_probs[idx], self.advantages[idx], self.returns[idx])
+
+
 
 class TrainingBuffer:
     """
@@ -134,61 +187,3 @@ class TrainingBuffer:
             experience sample at the given index
         """
         return self.buffer[index]
-
-
-
-class Batcher:
-    """
-    Represents a rollout dataset for training the PPO agent.
-
-    """
-    def __init__(self, states: torch.Tensor, actions: torch.Tensor, log_probs: torch.Tensor, advantages: torch.Tensor, returns: torch.Tensor) -> None:
-        self.states = states
-        self.actions = actions
-        self.log_probs = log_probs
-        self.advantages = advantages
-        self.returns = returns
-
-        self.batch_idx = np.random.permutation(len(self))
-        self.batch_start = 0
-
-    def __len__(self) -> int:
-        """
-        Returns the number of samples in the dataset
-
-        Returns
-        -------
-        int
-            number of samples in the dataset
-        """
-
-        return int(self.returns.nelement())
-
-    def restart(self) -> None:
-        """
-        Clears the dataset
-        """
-
-        self.batch_idx = np.random.permutation(len(self))
-        self.batch_start = 0
-
-    def next_batch(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Returns the next batch of the dataset
-
-        Parameters
-        ----------
-        batch_size : int
-            size of the batch
-
-        Returns
-        -------
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-            batch of states, actions, log_probs, advantages and returns
-        """
-
-        buffer_len = len(self)
-        batch_end = min(self.batch_start + batch_size, buffer_len)
-        idx = self.batch_idx[self.batch_start:batch_end]
-        self.batch_start = batch_end
-        return (self.states[idx, :], self.actions[idx, :], self.log_probs[idx], self.advantages[idx], self.returns[idx])

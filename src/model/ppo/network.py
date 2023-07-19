@@ -1,4 +1,4 @@
-from typing import List, Type, Optional, Dict
+from typing import List, Type, Optional, Dict, Union, Tuple
 import numpy as np
 import torch
 from torch import nn
@@ -130,7 +130,8 @@ class Actor(nn.Module):
             'hidden_sizes': self.hidden_sizes,
             'action_limit': self.action_limit,
             'hidden_activation': self.hidden_activation,
-            'output_activation': self.output_activation}
+            'output_activation': self.output_activation,
+            }
         return state
 
     def set_state(self, state):
@@ -336,7 +337,8 @@ class PPOPolicy(nn.Module):
 
         super(PPOPolicy, self).__init__()
 
-        self.seed = torch.manual_seed(seed) if seed is not None else None
+        torch.manual_seed(seed) if seed is not None else None
+        self.seed = seed
         self.state_dim, self.action_dim = state_dim, action_dim
         self.actor_hidden_sizes, self.critic_hidden_sizes = actor_hidden_sizes, critic_hidden_sizes
         self.hidden_activation = hidden_activation
@@ -345,7 +347,8 @@ class PPOPolicy(nn.Module):
 
         self.pi = Actor(state_dim, action_dim, actor_hidden_sizes, action_limit, hidden_activation, output_activation, seed)
         self.V = Critic(state_dim, action_dim, critic_hidden_sizes, hidden_activation, seed)
-        self.log_std = nn.Parameter(torch.ones(1, self.action_dim) * torch.log(torch.as_tensor(initial_std_value)))
+        self.log_std = nn.Parameter(
+            torch.ones(1, self.action_dim) * torch.log(torch.as_tensor(initial_std_value)))
 
     def reset(self):
         """
@@ -469,14 +472,18 @@ class PPOPolicy(nn.Module):
         state = {
             'pi': self.pi.get_state(),
             'V': self.V.get_state(),
+            'log_std': torch.Tensor(self.log_std),
             'state_dim': self.state_dim,
-            'action_dim': self.action_dim}
+            'action_dim': self.action_dim,
+            'seed': self.seed
+            }
         return state
 
     def set_state(self, state):
         """Assigns the state to the policy"""
         self.pi.set_state(state['pi'])
         self.V.set_state(state['V'])
+        self.log_std = nn.Parameter(state['log_std'])
         self.state_dim = state['state_dim']
         self.action_dim = state['action_dim']
 

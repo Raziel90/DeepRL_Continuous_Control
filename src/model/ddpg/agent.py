@@ -1,6 +1,6 @@
 
 import logging
-from typing import Dict, Tuple, Optional, TypeVar
+from typing import Dict, Tuple, Optional, TypeVar, Union
 
 from tqdm import tqdm
 
@@ -67,6 +67,27 @@ class DDPGAgent:
         new_agent = cls(agent.env, network_config=network_config, seed=agent.seed)
         new_agent.policy.load_state_dict(agent.policy.state_dict())
         return new_agent
+
+    @classmethod
+    def from_file(cls, env: UnityEnvironment, filename: str):
+        state = torch.load(filename)
+        # print(state['pi']['hidden_activation'])
+        network_config = {
+            'action_limit': state['pi']['action_limit'],
+            'actor_hidden_sizes': state['pi']['hidden_sizes'],
+            'critic_hidden_sizes': state['V']['hidden_sizes'],
+            'hidden_actor_activation': state['pi']['hidden_activation'],
+            'hidden_critic_activation': state['V']['activation'],
+            'output_actor_activation': state['pi']['output_activation']
+            }
+        # print(network_config.keys())
+        agent = cls(env, network_config=network_config, seed=state.get('seed', None))
+        agent.policy.set_state(state)
+
+        return agent
+
+    def to_file(self, filename: str):
+        torch.save(self.policy.get_state(), filename)
 
     def act(self, state: np.ndarray, add_noise: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         self.policy.eval()

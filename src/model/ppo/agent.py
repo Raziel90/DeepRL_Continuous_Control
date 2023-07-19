@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 from torch import distributions as dist
-from typing import Dict, TypeVar
+from typing import Dict, TypeVar, Tuple, Union
 from unityagents import UnityEnvironment
 import numpy as np
 from scipy.stats import norm
@@ -60,6 +60,23 @@ class PPOAgent:
         new_agent = cls(agent.env, network_config=network_config, seed=agent.seed)
         new_agent.policy.load_state_dict(agent.policy.state_dict())
         return new_agent
+
+    @classmethod
+    def from_file(cls, env: UnityEnvironment, filename: str):
+        state = torch.load(filename)
+        network_config = {
+            'action_limit': state['pi']['action_limit'],
+            'actor_hidden_sizes': state['pi']['hidden_sizes'],
+            'critic_hidden_sizes': state['V']['hidden_sizes'],
+            'hidden_activation': state['pi']['hidden_activation'],
+            'output_activation': state['pi']['output_activation']
+            }
+        agent = cls(env, network_config=network_config, seed=state.get('seed', None))
+        agent.policy.set_state(state)
+        return agent
+
+    def to_file(self, filename: str):
+        self.policy.to_file(filename)
 
     def act(self, state: np.ndarray, noisy: bool=False) -> Tuple[torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray]:
         action, log_prob = self.policy.act(state, noisy)

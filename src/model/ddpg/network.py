@@ -190,22 +190,25 @@ class Critic(nn.Module):
 class DDPGPolicy(nn.Module):
     def __init__(self, state_dim: int, action_dim: int,
                  actor_hidden_sizes: List[int], critic_hidden_sizes: List[int],
-                 action_limit: float = 1., seed=None) -> None:
+                 action_limit: float = 1.,
+                 hidden_actor_activation: Type[nn.Module] = nn.ReLU,
+                 output_actor_activation: Type[nn.Module] = nn.Tanh,
+                 hidden_critic_activation: Type[nn.Module] = nn.LeakyReLU,
+                 seed=None) -> None:
         super(DDPGPolicy, self).__init__()
 
-
-        self.seed = torch.manual_seed(seed) if seed is not None else seed
+        torch.manual_seed(seed) if seed is not None else seed
+        self.seed = seed
 
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.action_limit = action_limit
         self.actor_hidden_sizes = actor_hidden_sizes
         self.critic_hidden_sizes = critic_hidden_sizes
-        self.pi = Actor(state_dim, action_dim, actor_hidden_sizes, action_limit, nn.ReLU, nn.Tanh, seed)
-        # self.pi = Actor(state_dim, action_dim, seed)
-        self.V = Critic(state_dim, action_dim, critic_hidden_sizes, nn.LeakyReLU, seed)
-        # self.V = Critic(state_dim, action_dim, seed)
 
+        self.pi = Actor(state_dim, action_dim, actor_hidden_sizes, action_limit,
+                        hidden_actor_activation, output_actor_activation, seed)
+        self.V = Critic(state_dim, action_dim, critic_hidden_sizes, hidden_critic_activation, seed)
     @property
     def network_dim(self):
         return self.pi.network_dim, self.V.network_dim
@@ -243,7 +246,9 @@ class DDPGPolicy(nn.Module):
             'pi': self.pi.get_state(),
             'V': self.V.get_state(),
             'state_dim': self.state_dim,
-            'action_dim': self.action_dim}
+            'action_dim': self.action_dim,
+            'seed': self.seed
+            }
         return state
 
     def set_state(self, state):

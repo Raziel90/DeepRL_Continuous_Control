@@ -65,7 +65,7 @@ class DDPGTrainer:
                 self.scores_deque.append(score)
                 self.scores.append(score)
                 pbar.set_description(f"Episode {i_episode} Score: {score.mean():.2f}, 100 episode Mean Score: {np.mean(self.scores_deque, axis=0).mean():.2f}")
-                if (np.mean(self.scores_deque, axis=0) > target).any():
+                if (np.mean(self.scores_deque, axis=0) > target).all()  and len(self.scores) > 100:
                     episode100_mean = np.mean(self.scores_deque, axis=0)
                     threads = ' '.join(np.arange(self.local_agent.n_threads).astype(str)[episode100_mean > target].tolist())
                     pbar.clear()
