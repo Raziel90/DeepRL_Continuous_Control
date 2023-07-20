@@ -98,7 +98,7 @@ This used implementation of the PPO algorithm uses the following modules:
 - In the Actor the hidden units use `ReLU` and `Tanh` for the output layer to guarantee an action space $\in [-1, 1]$. For the critic there is no output transfer function, but the hidden units use `LeakyReLU` reducing the insurgence of dead neurons during training.
 
 #### The training implementation uses:
-- learning rate for actor and critic of `1e-4` while it uses `1e-3` for training the std parameters.
+- learning rate for actor and critic of `1e-4`.
 - We implement 2 different versions of the ReplayBuffer: with and without priority.
 - We use a discount factor $\gamma$ = `0.99` to improve the longtermism of the agent.
 - The Target network is updated from the local network with $\tau$ = `0.01`
@@ -139,7 +139,7 @@ It did not seem to help particularly and slowed down the model execution signifi
 <img src="figures/DDPG_priority_Training_progression.png" alt="DDPG Training progression" style="border: 5px solid gray; background: white; align: center">
 
 
-## Section 5: Possible improvements
+## Section 5: Future improvements
 ### Environment/Problem
 - Continuously decrease the radius of the target sphere with the improvement of the performance. This will generate robots to reach accurately every point of the workspace.
 - Adding obstacles in the path to teach the algorithm to perform some obstacle avoidance behaviour. Perhaps this can be performed with an hierarchical agent (e.g. one generates the naive next step of the trajectory, another uses it as input to created a obstacle avoiding trajectory).
